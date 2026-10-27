@@ -33,6 +33,8 @@ use process::*;
 
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
+    // AI 辅助：OpenAI Codex 补充统一计数，使本次 trace 查询也包含在统计中。
+    crate::task::record_syscall(syscall_id); // 先计数，再执行，包括此次 trace 查询
     match syscall_id {
         SYSCALL_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),
         SYSCALL_EXIT => sys_exit(args[0] as i32),

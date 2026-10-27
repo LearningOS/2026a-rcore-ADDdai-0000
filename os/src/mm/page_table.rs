@@ -107,7 +107,7 @@ impl PageTable {
                 break;
             }
             if !pte.is_valid() {
-                let frame = frame_alloc().unwrap();
+                let frame = frame_alloc()?; // 页表页分配失败，向上传递 None
                 *pte = PageTableEntry::new(frame.ppn, PTEFlags::V);
                 self.frames.push(frame);
             }
@@ -139,6 +139,16 @@ impl PageTable {
         let pte = self.find_pte_create(vpn).unwrap();
         assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
+    }
+    // AI 辅助：OpenAI Codex 补充可失败映射接口及 find_pte_create 的失败传递。
+    /// 尝试建立一页映射，页表页不足时返回 None。
+    pub fn try_map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) -> Option<()> {
+        let pte = self.find_pte_create(vpn)?; // 找到或创建末级项，分配失败就返回
+        if pte.is_valid() {
+            return None; // 不覆盖已有映射
+        }
+        *pte = PageTableEntry::new(ppn, flags | PTEFlags::V); // 写入页号和权限，加 V
+        Some(()) // 只表示成功，不携带其他数据
     }
     /// remove the map between virtual page number and physical page number
     #[allow(unused)]

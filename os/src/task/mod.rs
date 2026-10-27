@@ -202,3 +202,37 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
 }
+
+// AI 辅助：OpenAI Codex 补全本章的独立调用计数，以及访问当前任务地址空间的接口。
+/// 记录当前任务发起的一次系统调用。
+pub fn record_syscall(id: usize) {
+    let mut inner = TASK_MANAGER.inner.exclusive_access(); // 借出任务管理器
+    let current = inner.current_task; // 当前运行任务的下标
+    if let Some(count) = inner.tasks[current].syscall_counts.get_mut(id) {
+        *count += 1; // get_mut 返回计数元素的可变引用，解引用后加一
+    } // id 超出数组时不访问数组，避免越界
+}
+
+/// 查询当前任务某个系统调用的累计次数。
+pub fn get_record_syscall(id: usize) -> isize {
+    let inner = TASK_MANAGER.inner.exclusive_access(); // 查询也通过现有借用接口
+    let current = inner.current_task; // 仍然只查询自己的记录
+    match inner.tasks[current].syscall_counts.get(id) {
+        Some(count) => *count as isize, // 取出数值，并转换成系统调用返回类型
+        None => -1,                     // 超出支持的统计范围
+    } // match 是最后一个表达式，其结果就是函数返回值
+}
+
+/// 为当前任务添加用户内存映射。
+pub fn mmap_current(start: usize, len: usize, prot: usize) -> isize {
+    let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let current = inner.current_task; // 先取下标，避免同时可变和不可变借用 inner
+    inner.tasks[current].memory_set.mmap(start, len, prot) // 转交自己的地址空间
+}
+
+/// 撤销当前任务的用户内存映射。
+pub fn munmap_current(start: usize, len: usize) -> isize {
+    let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let current = inner.current_task;
+    inner.tasks[current].memory_set.munmap(start, len) // 不修改其他任务的页表
+}
