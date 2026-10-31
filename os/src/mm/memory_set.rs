@@ -43,6 +43,135 @@ pub struct MemorySet {
 }
 
 impl MemorySet {
+    // AI 辅助：OpenAI Codex 提供并补全了本章范围校验、匿名映射和区域拆分回收逻辑。
+    // 参考课程 chapter4/7exercise.html，交流与验证记录见 reports/lab2.md。
+    // 将字节区间转换成左闭右开的页号区间。
+    fn checked_page_range(start: usize, len: usize) -> Option<VPNRange> {
+        if start % PAGE_SIZE != 0 {
+            return None; // 起始地址必须按 4096 字节对齐
+        }
+        let va = VirtAddr::from(start);
+        if usize::from(va) != start {
+            return None; // 拒绝非法的 SV39 地址，防止高位被截断后访问别处
+        }
+        let first = va.floor(); // 起始虚拟页号
+        if len == 0 {
+            return Some(VPNRange::new(first, first)); // 空区间不需要任何页面
+        }
+        let last_addr = start.checked_add(len - 1)?; // 最后一个字节，溢出则失败
+        let last_va = VirtAddr::from(last_addr);
+        if usize::from(last_va) != last_addr || (start >> 38) != (last_addr >> 38) {
+            return None; // 末地址也必须合法，而且区间不能穿过 SV39 地址空洞
+        }
+        let end = VirtPageNum(last_va.floor().0 + 1); // 最后一个页面的下一页
+        Some(VPNRange::new(first, end)) // 遍历时包含 first，不包含 end
+    }
+    /// 为用户按页分配内存，成功返回 0，参数错误或页帧不足返回 -1。
+    pub fn mmap(&mut self, start: usize, len: usize, prot: usize) -> isize {
+        if prot & !0x7 != 0 || prot & 0x7 == 0 {
+            return -1; // 只接受低三位，且至少指定一种权限
+        }
+        let range = match Self::checked_page_range(start, len) {
+            Some(range) => range,
+            None => return -1,
+        };
+        if range.get_start() == range.get_end() {
+            return 0; // 长度为 0，无须分配
+        }
+        for vpn in range {
+            if let Some(pte) = self.translate(vpn) {
+                if pte.is_valid() {
+                    return -1; // 先检查全部页面，已有映射就拒绝
+                }
+            }
+        }
+        let permission = MapPermission::from_bits((prot << 1) as u8).unwrap() | MapPermission::U; // prot 的 R/W/X 左移一位，再允许用户态访问
+        let flags = PTEFlags::from_bits(permission.bits).unwrap(); // 转为页表项权限
+        let mut area = MapArea {
+            vpn_range: range,             // 记录完整虚拟页区间
+            data_frames: BTreeMap::new(), // 稍后持有分配到的 FrameTracker
+            map_type: MapType::Framed,    // 每个虚拟页分配一个独立物理页
+            map_perm: permission,
+        };
+        for vpn in range {
+            // 小闭包让 ? 可以在“分配一页”这一步返回 None。
+            let mapped = (|| -> Option<()> {
+                let frame = frame_alloc()?; // 分配并清零一个数据页
+                self.page_table.try_map(vpn, frame.ppn, flags)?; // 建立页表映射
+                area.data_frames.insert(vpn, frame); // 把页帧所有权交给 area
+                Some(())
+            })(); // 最后的 () 表示立即执行这个闭包
+            if mapped.is_none() {
+                for mapped_vpn in area.data_frames.keys() {
+                    self.page_table.unmap(*mapped_vpn); // 撤销本次已经建立的映射
+                }
+                return -1; // area 离开作用域，其 FrameTracker 自动回收数据页
+            }
+        }
+        self.areas.push(area); // 成功后保存区域，保证这些物理页继续存活
+        0
+    }
+    /// 撤销用户页面映射并回收数据页，支持只撤销一个区域的中间部分。
+    pub fn munmap(&mut self, start: usize, len: usize) -> isize {
+        let range = match Self::checked_page_range(start, len) {
+            Some(range) => range,
+            None => return -1,
+        };
+        let left = range.get_start(); // 要删除的起始页，包含它
+        let right = range.get_end(); // 要删除的终点页，不包含它
+        if left == right {
+            return 0; // 空区间
+        }
+        for vpn in range {
+            let pte = match self.translate(vpn) {
+                Some(pte) => pte,
+                None => return -1, // 页表中不存在对应项
+            };
+            if !pte.flags().contains(PTEFlags::V | PTEFlags::U) {
+                return -1; // 无效页不能删除，也不允许删除内核专用页
+            }
+            if !self
+                .areas
+                .iter()
+                .any(|area| area.map_type == MapType::Framed && area.data_frames.contains_key(&vpn))
+            {
+                return -1; // 确认该用户页的物理页帧由我们的区域管理
+            }
+        }
+        let old_areas = core::mem::take(&mut self.areas); // 取走原 Vec，原位置留下空 Vec
+        for mut area in old_areas {
+            let begin = area.vpn_range.get_start(); // 此区域的起点
+            let end = area.vpn_range.get_end(); // 此区域的终点
+            if begin == end || end <= left || begin >= right {
+                self.areas.push(area); // 空区域或没有交集，原样保留
+                continue;
+            }
+            let cut_begin = begin.max(left); // 实际删除范围：两个区间的交集
+            let cut_end = end.min(right);
+            let permission = area.map_perm; // 后面构造右半段时需要原权限
+            let map_type = area.map_type;
+            let right_frames = area.data_frames.split_off(&cut_end); // 取出右侧保留页面
+            let removed_frames = area.data_frames.split_off(&cut_begin); // 取出中间待删页面
+            for vpn in VPNRange::new(cut_begin, cut_end) {
+                self.page_table.unmap(vpn); // 先让页表项失效
+            }
+            drop(removed_frames); // 再释放 FrameTracker，物理数据页归还分配器
+            if begin < cut_begin {
+                area.vpn_range = VPNRange::new(begin, cut_begin); // 左半段的新区间
+                self.areas.push(area); // area 现在只持有左半段的页帧
+            }
+            if cut_end < end {
+                self.areas.push(MapArea {
+                    vpn_range: VPNRange::new(cut_end, end), // 右半段的新区间
+                    data_frames: right_frames,              // 右侧原有页帧继续保留，不复制内容
+                    map_type,
+                    map_perm: permission,
+                });
+            }
+        }
+        0
+    }
+
     /// Create a new empty `MemorySet`.
     pub fn new_bare() -> Self {
         Self {

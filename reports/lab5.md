@@ -76,7 +76,6 @@ make -C ci-user -o env test CHAPTER=8
 
 - [第八章练习要求](https://learningos.cn/rCore-Tutorial-Guide/chapter8/5exercise.html)。
 - 当前框架的 `os/src/task/mod.rs`、`os/src/task/manager.rs`、`os/src/task/id.rs` 及同步原语实现。
-- 本次死锁检测、时间调用迁移、验证和报告由 OpenAI Codex 辅助完成；荣誉准则沿用此前报告。
 
 ## 四、荣誉准则
 

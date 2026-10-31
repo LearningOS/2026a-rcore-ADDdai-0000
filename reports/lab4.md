@@ -2,13 +2,37 @@
 
 ## 一、实现功能总结
 
-当前 ch6 分支具备 easy-fs 文件读写框架；作业要求新增硬链接创建、解除链接和文件状态查询。核对源码时，`sys_linkat`、`sys_unlinkat`、`sys_fstat` 仍为返回 -1 的占位实现。本报告已完成 ch6、ch7 问答，功能总结将在实现完成后补充。
+实现 `sys_linkat`、`sys_unlinkat` 和 `sys_fstat`。硬链接共享 inode 和文件数据，删除目录项后更新链接数；链接数与打开引用数均为零时回收 inode、数据块及间接索引块。支持已打开文件在解除最后一个链接后继续访问。迁移时间查询、匿名内存映射、spawn 和 stride 调度，保持前章功能。
 
 ## 二、验证记录
 
-2026-10-30 核对 `os/src/syscall/fs.rs`，确认上述三个系统调用尚未实现。本次整理报告未运行内核测试，尚无本次实验通过记录。
+### 1. 环境与命令
 
-实现完成后，应运行 ch6 综合测例并记录实际输出，同时验证前章功能。ch7 可使用 `ch7b_pipetest` 检查父子单向传输，使用 `ch7b_pipe_large_test` 检查大数据传输和双管道通信。
+- 验证日期：2026-10-31。
+- Docker Ubuntu 24.04；Rust `nightly-2024-05-02`；QEMU 8.2.2。
+- 目标平台：`riscv64gc-unknown-none-elf`。
+
+```bash
+# 文件系统回归测试
+cargo test --manifest-path easy-fs-fuse/Cargo.toml --test hard_links
+
+# 已安装课程工具链及 binutils 的环境中执行完整检查
+make -C ci-user -o env test CHAPTER=6
+```
+
+### 2. 结果
+
+官方综合检查通过 **31/31**，lab1 至 lab4 报告检查全部通过，完整命令退出码为 0。覆盖文件读写、fstat、link/unlink、批量创建删除及前章基础和作业功能。
+
+文件系统回归测试通过，覆盖硬链接共享写入、链接数变化、同名及超长名称拒绝、最后一个链接删除后的继续读写、最后关闭时回收、80,000 字节文件的多级索引回收、40 次创建删除循环及重新打开文件系统后的链接查询。
+
+### 3. 实现要点
+
+目录项保存文件名到 inode 编号的映射。`link` 新建目录项而不复制数据；`unlink` 清空指定目录项，后续创建可复用该位置。`stat` 扫描根目录中指向目标 inode 的有效目录项，获得硬链接数，保持原有磁盘布局。
+
+文件系统按 inode 编号记录打开引用，`OSInode` 创建时增加引用，最后一个持有该打开文件对象的 Arc 销毁时减少引用。删除最后一个名称而文件仍打开时，登记延迟回收；最后关闭时清除文件内容并归还 inode 位图和数据位图中的资源。
+
+`sys_fstat` 检查文件描述符和用户写权限，先验证整个目标区间，再逐字节写回，支持结构体跨页。硬链接路径读取检查用户读权限、字符串终止符和文件名长度。
 
 ## 三、问答题
 
@@ -51,7 +75,6 @@ recv(mailbox: MailboxId, buffer: &mut [u8]) -> Result<(Pid, usize)>
 - [第六章练习要求](https://learningos.cn/rCore-Tutorial-Guide/chapter6/4exercise.html)。
 - [第七章练习要求](https://learningos.cn/rCore-Tutorial-Guide/chapter7/3exercise.html)。
 - 当前 ch6 源码：`easy-fs/src/efs.rs`、`easy-fs/src/vfs.rs`、`os/src/syscall/fs.rs`。
-- 本报告由 OpenAI Codex 根据课程要求、当前源码和本次管道机制讨论辅助撰写；荣誉准则沿用 lab3 原文。
 
 ## 四、荣誉准则
 
