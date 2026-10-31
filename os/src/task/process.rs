@@ -7,7 +7,7 @@ use super::{add_task, SignalFlags};
 use super::{pid_alloc, PidHandle};
 use crate::fs::{File, Stdin, Stdout};
 use crate::mm::{translated_refmut, MemorySet, KERNEL_SPACE};
-use crate::sync::{Condvar, Mutex, Semaphore, UPSafeCell};
+use crate::sync::{Condvar, DeadlockDetector, Mutex, Semaphore, UPSafeCell};
 use crate::trap::{trap_handler, TrapContext};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
@@ -47,6 +47,10 @@ pub struct ProcessControlBlockInner {
     pub mutex_list: Vec<Option<Arc<dyn Mutex>>>,
     /// semaphore list
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
+    /// Allocation accounting shared by this process's mutexes.
+    pub mutex_detect: Arc<UPSafeCell<DeadlockDetector>>,
+    /// Allocation accounting shared by this process's semaphores.
+    pub semaphore_detect: Arc<UPSafeCell<DeadlockDetector>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
 }
@@ -72,6 +76,8 @@ impl ProcessControlBlockInner {
     }
     /// deallocate a task id
     pub fn dealloc_tid(&mut self, tid: usize) {
+        self.mutex_detect.exclusive_access().forget_thread(tid);
+        self.semaphore_detect.exclusive_access().forget_thread(tid);
         self.task_res_allocator.dealloc(tid)
     }
     /// the count of tasks(threads) in this process
@@ -116,6 +122,8 @@ impl ProcessControlBlock {
                     signals: SignalFlags::empty(),
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
+                    mutex_detect: Arc::new(UPSafeCell::new(DeadlockDetector::default())),
+                    semaphore_detect: Arc::new(UPSafeCell::new(DeadlockDetector::default())),
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
@@ -242,6 +250,8 @@ impl ProcessControlBlock {
                     signals: SignalFlags::empty(),
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
+                    mutex_detect: Arc::new(UPSafeCell::new(DeadlockDetector::default())),
+                    semaphore_detect: Arc::new(UPSafeCell::new(DeadlockDetector::default())),
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
